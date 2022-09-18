@@ -32,6 +32,8 @@ const i2s_port_t I2S_PORT = I2S_NUM_0;
 #define BLOCK_SIZE 512
 #define NUM_BANDS 8
 #define REFRESH_CYCLE 30000
+// Use I2S Processor 0
+#define I2S_PORT I2S_NUM_0
 
 
 
@@ -69,7 +71,7 @@ bool listening = true;
 //global variables needed for FFT
 double vReal[BLOCK_SIZE];
 double vImag[BLOCK_SIZE];
-int32_t samples[BLOCK_SIZE];
+int16_t sBuffer[BLOCK_SIZE];
 
 int momVal[BLOCK_SIZE];
 int maxVal = 1;
@@ -89,12 +91,13 @@ void setupMic() {
   const i2s_config_t i2s_config = {
     .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX), // Receive, not transfer
     .sample_rate = SAMPLING_FREQUENCY,                        
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT, // could only get it to work with 32bits
-    .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT, // although the SEL config should be left, it seems to transmit on right
+    .bits_per_sample = i2s_bits_per_sample_t(16), // could only get it to work with 32bits
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // although the SEL config should be left, it seems to transmit on right
     .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,     // Interrupt level 1
-    .dma_buf_count = 4,                           // number of buffers
-    .dma_buf_len = BLOCK_SIZE                     // samples per buffer
+    .intr_alloc_flags = 0,     // Interrupt level 1
+    .dma_buf_count = 8,                           // number of buffers
+    .dma_buf_len = BLOCK_SIZE,                     // samples per buffer
+    .use_apll = false
   };
 
   // The pin config as per the setup
@@ -117,8 +120,12 @@ void setupMic() {
     Serial.printf("Failed setting pin: %d\n", err);
     while (true);
   }
-  Serial.println("I2S driver installed.");
+  Serial.println("I2S driver installed.");  
+  
+  i2s_start(I2S_PORT);
 }
+
+
 
 
 // get specific global variable
@@ -352,46 +359,58 @@ void loop() {
   {
 
     /*SAMPLING I2S MIC*/
-    int num_bytes_read = i2s_read_bytes(I2S_PORT, 
-                                      (char *)samples, 
-                                      BLOCK_SIZE,     // the doc says bytes, but its elements.
-                                      portMAX_DELAY); // no timeout
+    size_t bytesIn = 0;
+    esp_err_t result = i2s_read(I2S_PORT, 
+                                &sBuffer, 
+                                BLOCK_SIZE, 
+                                &bytesIn, 
+                                portMAX_DELAY);
 
-    for (uint16_t i = 0; i < BLOCK_SIZE; i++) {
-      vReal[i] = samples[i] << 8;
-      vImag[i] = 0.0; //Imaginary part must be zeroed in case of looping to avoid wrong calculations and overflows
-    }
- 
-    /*FFT*/
-    FFT.Windowing(vReal, BLOCK_SIZE, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-    FFT.Compute(vReal, vImag, BLOCK_SIZE, FFT_FORWARD);
-    FFT.ComplexToMagnitude(vReal, vImag, BLOCK_SIZE);
-    // double peak = FFT.MajorPeak(vReal, SAMPLES, SAMPLING_FREQUENCY);
+    if (result == ESP_OK)
+    {
+      Serial.println(sBuffer[0]);
 
-    for (int i = 0; i < 8; i++) {
-    bands[i] = 0;
-    }
-    
-    for (int i = 0; i < (BLOCK_SIZE/2); i++){ // Don't use sample 0 and only first SAMPLES/2 are usable. Each array eleement represents a frequency and its value the amplitude.
-      if (vReal[i] > 2000) { // Add a crude noise filter, 10 x amplitude or more
-        if (i<=2 )             bands[0] = max(bands[0], min(255, (int)(vReal[i]/amplitude))); // 125Hz
-        if (i >3   && i<=5 )   bands[1] = max(bands[1], min(255, (int)(vReal[i]/amplitude))); // 250Hz
-        if (i >5   && i<=7 )   bands[2] = max(bands[2], min(255, (int)(vReal[i]/amplitude))); // 500Hz
-        if (i >7   && i<=15 )  bands[3] = max(bands[3], min(255, (int)(vReal[i]/amplitude))); // 1000Hz
-        if (i >15  && i<=30 )  bands[4] = max(bands[4], min(255, (int)(vReal[i]/amplitude))); // 2000Hz
-        if (i >30  && i<=53 )  bands[5] = max(bands[5], min(255, (int)(vReal[i]/amplitude))); // 4000Hz
-        if (i >53  && i<=200 ) bands[6] = max(bands[6], min(255, (int)(vReal[i]/amplitude))); // 8000Hz
-        if (i >200           ) bands[7] = max(bands[7], min(255, (int)(vReal[i]/amplitude))); // 16000Hz
+      for (uint16_t i = 0; i < BLOCK_SIZE; i++) {
+        vReal[i] = sBuffer[i] << 8;
+        vImag[i] = 0.0; //Imaginary part must be zeroed in case of looping to avoid wrong calculations and overflows
+      }
+  
+      /*FFT*/
+      FFT.Windowing(vReal, BLOCK_SIZE, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+      FFT.Compute(vReal, vImag, BLOCK_SIZE, FFT_FORWARD);
+      FFT.ComplexToMagnitude(vReal, vImag, BLOCK_SIZE);
+      // double peak = FFT.MajorPeak(vReal, SAMPLES, SAMPLING_FREQUENCY);
+
+      for (int i = 0; i < 8; i++) {
+      bands[i] = 0;
+      }
+      
+      for (int i = 0; i < (BLOCK_SIZE/2); i++){ // Don't use sample 0 and only first SAMPLES/2 are usable. Each array eleement represents a frequency and its value the amplitude.
+        if (vReal[i] > 2000) { // Add a crude noise filter, 10 x amplitude or more
+          if (i<=2 )             bands[0] = max(bands[0], min(255, (int)(vReal[i]/amplitude))); // 125Hz
+          if (i >3   && i<=5 )   bands[1] = max(bands[1], min(255, (int)(vReal[i]/amplitude))); // 250Hz
+          if (i >5   && i<=7 )   bands[2] = max(bands[2], min(255, (int)(vReal[i]/amplitude))); // 500Hz
+          if (i >7   && i<=15 )  bands[3] = max(bands[3], min(255, (int)(vReal[i]/amplitude))); // 1000Hz
+          if (i >15  && i<=30 )  bands[4] = max(bands[4], min(255, (int)(vReal[i]/amplitude))); // 2000Hz
+          if (i >30  && i<=53 )  bands[5] = max(bands[5], min(255, (int)(vReal[i]/amplitude))); // 4000Hz
+          if (i >53  && i<=200 ) bands[6] = max(bands[6], min(255, (int)(vReal[i]/amplitude))); // 8000Hz
+          if (i >200           ) bands[7] = max(bands[7], min(255, (int)(vReal[i]/amplitude))); // 16000Hz
+        }
+      }
+
+      // this dynamically calibrates the values from each band
+      for (int i = 0; i < NUM_BANDS; i++)
+      {
+        // upper bound that decays over time
+        maxVal = max(max(maxVal - 1, 1), (int)bands[i]);
+        // momentary value maped according to upper bound
+        momVal[i] = max((long)momVal[i], map((long)bands[i], 0, (long)maxVal, 0, 255));
       }
     }
-
-    // this dynamically calibrates the values from each band
-    for (int i = 0; i < NUM_BANDS; i++)
+    else
     {
-      // upper bound that decays over time
-      maxVal = max(max(maxVal - 1, 1), (int)bands[i]);
-      // momentary value maped according to upper bound
-      momVal[i] = max((long)momVal[i], map((long)bands[i], 0, (long)maxVal, 0, 255));
+      Serial.println("Something went wrong while recording");
+      on = false;
     }
     
   }
