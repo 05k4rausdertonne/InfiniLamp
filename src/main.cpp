@@ -35,8 +35,6 @@ const i2s_port_t I2S_PORT = I2S_NUM_0;
 // Use I2S Processor 0
 #define I2S_PORT I2S_NUM_0
 
-
-
 // define pin for led connection
 #define LED_PIN         27
 #define NUM_LEDS        232
@@ -71,7 +69,7 @@ bool listening = true;
 //global variables needed for FFT
 double vReal[BLOCK_SIZE];
 double vImag[BLOCK_SIZE];
-int16_t sBuffer[BLOCK_SIZE];
+int16_t samples[BLOCK_SIZE];
 
 int momVal[BLOCK_SIZE];
 int maxVal = 1;
@@ -91,8 +89,8 @@ void setupMic() {
   const i2s_config_t i2s_config = {
     .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX), // Receive, not transfer
     .sample_rate = SAMPLING_FREQUENCY,                        
-    .bits_per_sample = i2s_bits_per_sample_t(16), // could only get it to work with 32bits
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // although the SEL config should be left, it seems to transmit on right
+    .bits_per_sample = i2s_bits_per_sample_t(32), // could only get it to work with 32bits
+    .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT, // although the SEL config should be left, it seems to transmit on right
     .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
     .intr_alloc_flags = 0,     // Interrupt level 1
     .dma_buf_count = 8,                           // number of buffers
@@ -361,17 +359,18 @@ void loop() {
     /*SAMPLING I2S MIC*/
     size_t bytesIn = 0;
     esp_err_t result = i2s_read(I2S_PORT, 
-                                &sBuffer, 
+                                (char *)samples, 
                                 BLOCK_SIZE, 
                                 &bytesIn, 
                                 portMAX_DELAY);
 
     if (result == ESP_OK)
     {
-      Serial.println(sBuffer[0]);
 
+        // Serial.println(samples[0]);
+        
       for (uint16_t i = 0; i < BLOCK_SIZE; i++) {
-        vReal[i] = sBuffer[i] << 8;
+        vReal[i] = samples[i] << 8;
         vImag[i] = 0.0; //Imaginary part must be zeroed in case of looping to avoid wrong calculations and overflows
       }
   
@@ -397,6 +396,8 @@ void loop() {
           if (i >200           ) bands[7] = max(bands[7], min(255, (int)(vReal[i]/amplitude))); // 16000Hz
         }
       }
+      
+        Serial.println(bands[0]); 
 
       // this dynamically calibrates the values from each band
       for (int i = 0; i < NUM_BANDS; i++)
@@ -515,6 +516,9 @@ void loop() {
           break;
 
         case 5:
+
+            // Serial.println(momVal[0]);
+
           if (momVal[0] < globalArgs[4])
           {
             momVal[0] = 0;
